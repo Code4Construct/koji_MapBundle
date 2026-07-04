@@ -33,6 +33,7 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -248,7 +249,7 @@ class MapSharingDialog(QDialog):
         self.setWindowTitle('koji_MapBundle')
         self.setWindowIcon(plugin_icon)
         self.setMinimumWidth(dpi_px(500))
-        self.resize(dpi_px(620), dpi_px(260))
+        self.resize(dpi_px(620), dpi_px(430))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(dpi_px(18), dpi_px(18), dpi_px(18), dpi_px(18))
@@ -295,21 +296,66 @@ class MapSharingDialog(QDialog):
         accent_line.setStyleSheet('background: #2f8f5b; border: none;')
         layout.addWidget(accent_line)
 
-        body_text = QLabel('選択したレイヤ、スタイル、シンボル、レイアウトを地図バンドルとして書き出し・読み込みします。')
-        body_text.setWordWrap(True)
-        layout.addWidget(body_text)
-
-        export_button = QPushButton('地図バンドルを書き出し')
-        export_button.clicked.connect(self.export_callback)
-        layout.addWidget(export_button)
-
-        import_button = QPushButton('地図バンドルを読み込み')
-        import_button.clicked.connect(self.import_callback)
-        layout.addWidget(import_button)
+        icons_dir = os.path.join(os.path.dirname(__file__), 'icons')
+        layout.addWidget(self._create_action_row(
+            '地図バンドルを書き出し',
+            '選択したレイヤ、スタイル、シンボル、レイアウトをZIP形式の地図バンドルとして保存します。',
+            os.path.join(icons_dir, 'map_bundle_export.png'),
+            self.export_callback,
+        ))
+        layout.addWidget(self._create_action_row(
+            '地図バンドルを読み込み',
+            '受け取った地図バンドルを展開し、GeoPackageをプロジェクトフォルダに保存してレイヤを追加します。',
+            os.path.join(icons_dir, 'map_bundle_import.png'),
+            self.import_callback,
+        ))
 
         button_box = QDialogButtonBox(QDialogButtonBox.Close)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
+
+    def _create_action_row(self, text, description, icon_path, callback):
+        row = QPushButton()
+        row.setMinimumHeight(dpi_px(118))
+        row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        row.setCursor(Qt.PointingHandCursor)
+        row.clicked.connect(callback)
+        row.setStyleSheet(
+            'QPushButton {{ text-align: left; border: {0}px solid #c8c8c8; border-radius: {1}px; background: #f7f7f7; }}'
+            'QPushButton:hover {{ background: #eef5ff; border-color: #7aa7d9; }}'
+            'QPushButton:pressed {{ background: #e0edf9; }}'
+            'QLabel {{ border: none; background: transparent; }}'
+            .format(dpi_px(1), dpi_px(4))
+        )
+
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(dpi_px(12), dpi_px(10), dpi_px(12), dpi_px(10))
+        row_layout.setSpacing(dpi_px(12))
+
+        icon_label = QLabel()
+        icon = QIcon(icon_path)
+        icon_size = dpi_px(76)
+        icon_box = dpi_px(88)
+        icon_label.setPixmap(icon.pixmap(icon_size, icon_size))
+        icon_label.setFixedSize(icon_box, icon_box)
+        icon_label.setAlignment(Qt.AlignCenter)
+        row_layout.addWidget(icon_label)
+
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(dpi_px(4))
+
+        name_label = QLabel(text)
+        name_label.setStyleSheet('font-weight: 600;')
+        description_label = QLabel(description)
+        description_label.setWordWrap(True)
+        description_label.setMinimumHeight(description_label.fontMetrics().lineSpacing() * 3 + dpi_px(6))
+        description_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        text_layout.addWidget(name_label)
+        text_layout.addWidget(description_label)
+        row_layout.addLayout(text_layout, 1)
+        return row
 
 
 class MapSharingPackagePreviewDialog(QDialog):

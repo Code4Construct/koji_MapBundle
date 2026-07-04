@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.zip
+ChatGPT Image*.png
 dist/
 koji_MapBundle_imported_packages/
 .agents/

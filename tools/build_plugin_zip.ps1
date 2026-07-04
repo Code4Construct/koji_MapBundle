@@ -29,6 +29,7 @@ $excludeDirs = @(
 $excludeFiles = @(
     ".editorconfig",
     ".gitignore",
+    "ChatGPT Image*.png",
     "*.pyc",
     "*.pyo",
     "*.zip"
