@@ -1161,7 +1161,7 @@ class MapSharingTool:
         return hasattr(node, 'children') and not hasattr(node, 'layerId')
 
     def _ask_import_group(self, manifest):
-        default_name = 'もらい物'
+        default_name = 'MapBundle'
         group_name, accepted = QInputDialog.getText(
             self.iface.mainWindow(),
             'インポート先フォルダ名',
