@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.zip
+dist/
+koji_MapBundle_imported_packages/
+.agents/
+.qodo/
