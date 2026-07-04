@@ -26,7 +26,8 @@ sources after import.
 ## Import Storage
 
 When a bundle is imported, its contents are copied to a folder in the same
-directory as the current QGIS project file.
+directory as the current QGIS project file. The plugin asks for the imported
+GeoPackage name and uses `MapBundle` as the default.
 
 Example:
 
@@ -34,7 +35,7 @@ Example:
 sample.qgz
 SampleProject_20260704_220000/
   data/
-    koji_MapBundle_layers.gpkg
+    MapBundle.gpkg
   styles/
   symbols/
   layouts/

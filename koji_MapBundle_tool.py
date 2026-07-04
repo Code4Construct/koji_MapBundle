@@ -911,7 +911,69 @@ class MapSharingTool:
         if os.path.exists(storage_dir):
             shutil.rmtree(storage_dir)
         shutil.copytree(package_dir, storage_dir)
+        if not self._rename_imported_geopackages(storage_dir, manifest):
+            return None
         return storage_dir
+
+    def _rename_imported_geopackages(self, storage_dir, manifest):
+        gpkg_rel_paths = []
+        for layer_info in manifest.get('layers', []):
+            rel_path = layer_info.get('path')
+            if rel_path and rel_path.lower().endswith('.gpkg') and rel_path not in gpkg_rel_paths:
+                gpkg_rel_paths.append(rel_path)
+
+        if not gpkg_rel_paths:
+            return True
+
+        gpkg_name, accepted = QInputDialog.getText(
+            self.iface.mainWindow(),
+            'GeoPackage名',
+            '保存するGeoPackage名:',
+            QLineEdit.Normal,
+            'MapBundle',
+        )
+        if not accepted:
+            return False
+
+        gpkg_name = gpkg_name.strip()
+        if gpkg_name.lower().endswith('.gpkg'):
+            gpkg_name = gpkg_name[:-5]
+        gpkg_name = (self._safe_name(gpkg_name) or 'MapBundle') + '.gpkg'
+
+        rel_path_map = {}
+        used_names = set()
+        for index, rel_path in enumerate(gpkg_rel_paths, start=1):
+            source_path = os.path.normpath(os.path.join(storage_dir, rel_path))
+            self._assert_inside_directory(storage_dir, source_path)
+            if not os.path.exists(source_path):
+                raise ValueError('GeoPackageが見つかりません: {0}'.format(rel_path))
+
+            target_name = gpkg_name
+            if len(gpkg_rel_paths) > 1:
+                base_name, extension = os.path.splitext(gpkg_name)
+                target_name = '{0}_{1}{2}'.format(base_name, index, extension or '.gpkg')
+            target_name = self._unique_name(os.path.splitext(target_name)[0], used_names) + '.gpkg'
+            target_rel_path = 'data/{0}'.format(target_name)
+            target_path = os.path.normpath(os.path.join(storage_dir, target_rel_path))
+            self._assert_inside_directory(storage_dir, target_path)
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+            if os.path.abspath(source_path) != os.path.abspath(target_path):
+                if os.path.exists(target_path):
+                    os.remove(target_path)
+                shutil.move(source_path, target_path)
+            rel_path_map[rel_path] = target_rel_path
+
+        for layer_info in manifest.get('layers', []):
+            rel_path = layer_info.get('path')
+            if rel_path in rel_path_map:
+                layer_info['path'] = rel_path_map[rel_path]
+
+        manifest_path = os.path.join(storage_dir, 'manifest.json')
+        with open(manifest_path, 'w', encoding='utf-8') as manifest_file:
+            json.dump(manifest, manifest_file, ensure_ascii=False, indent=2)
+            manifest_file.write('\n')
+        return True
 
     def _project_package_storage_dir(self, manifest, zip_path=None):
         root_dir = self._project_bundle_root()
