@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import zipfile
 from datetime import datetime
+from urllib.parse import unquote, urlsplit
 
 from qgis.core import (
     QgsMapLayer,
@@ -17,12 +18,13 @@ from qgis.core import (
     QgsVectorFileWriter,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QStandardPaths, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtXml import QDomDocument
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -42,6 +44,7 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 
+from . import koji_MapBundle_i18n as i18n
 from .koji_MapBundle_ui import display_metrics_text, dpi_px
 
 
@@ -56,20 +59,20 @@ class MapSharingLayerSelectionDialog(QDialog):
         self.checked_layer_ids = set(checked_layer_ids or [])
         self._changing_checks = False
 
-        self.setWindowTitle('地図バンドルに入れるレイヤを選択')
+        self.setWindowTitle(i18n.tr('select_bundle_items_title'))
         self.resize(780, 620)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(10)
 
-        lead = QLabel('地図バンドルに入れるレイヤだけチェックしてください。')
+        lead = QLabel(i18n.tr('select_layers_lead'))
         lead.setWordWrap(True)
         layout.addWidget(lead)
 
         toolbar = QHBoxLayout()
-        select_all_button = QPushButton('すべて選択')
-        clear_button = QPushButton('選択解除')
+        select_all_button = QPushButton(i18n.tr('select_all'))
+        clear_button = QPushButton(i18n.tr('clear_selection'))
         select_all_button.clicked.connect(lambda: self._set_all_checked(True))
         clear_button.clicked.connect(lambda: self._set_all_checked(False))
         toolbar.addWidget(select_all_button)
@@ -79,7 +82,7 @@ class MapSharingLayerSelectionDialog(QDialog):
 
         self.tree = QTreeWidget()
         self.tree.setColumnCount(2)
-        self.tree.setHeaderLabels(['レイヤ構成', 'データソース'])
+        self.tree.setHeaderLabels([i18n.tr('layer_tree'), i18n.tr('data_source')])
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
         self.tree.itemChanged.connect(self._handle_item_changed)
@@ -88,19 +91,21 @@ class MapSharingLayerSelectionDialog(QDialog):
         self._build_layer_tree()
         self.tree.expandAll()
 
-        layout_label = QLabel('地図バンドルに入れるレイアウトを選択してください。')
+        layout_label = QLabel(i18n.tr('select_layouts_lead'))
         layout_label.setWordWrap(True)
         layout.addWidget(layout_label)
 
         self.layout_tree = QTreeWidget()
         self.layout_tree.setColumnCount(2)
-        self.layout_tree.setHeaderLabels(['レイアウト', '種類'])
+        self.layout_tree.setHeaderLabels([i18n.tr('layout'), i18n.tr('type')])
         self.layout_tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.layout_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self._build_layout_tree()
         layout.addWidget(self.layout_tree)
 
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.button(QDialogButtonBox.Ok).setText(i18n.tr('ok'))
+        button_box.button(QDialogButtonBox.Cancel).setText(i18n.tr('cancel'))
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
@@ -145,7 +150,7 @@ class MapSharingLayerSelectionDialog(QDialog):
 
     def _build_layout_tree(self):
         for layout in self.layouts:
-            item = QTreeWidgetItem(self.layout_tree.invisibleRootItem(), [layout.name(), 'レイアウト'])
+            item = QTreeWidgetItem(self.layout_tree.invisibleRootItem(), [layout.name(), i18n.tr('layout')])
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(0, Qt.Unchecked)
             item.setData(0, Qt.UserRole, layout.name())
@@ -176,11 +181,33 @@ class MapSharingLayerSelectionDialog(QDialog):
         return has_layers
 
     def _add_layer_item(self, parent_item, layer):
-        layer_item = QTreeWidgetItem(parent_item, [layer.name(), layer.source()])
+        source = layer.source()
+        display_source = self._display_layer_source(layer)
+        layer_item = QTreeWidgetItem(parent_item, [layer.name(), display_source])
         layer_item.setFlags(layer_item.flags() | Qt.ItemIsUserCheckable)
         checked = layer.id() in self.checked_layer_ids
         layer_item.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
         layer_item.setData(0, Qt.UserRole, layer.id())
+        if display_source != source:
+            layer_item.setToolTip(1, source)
+
+    def _display_layer_source(self, layer):
+        source = layer.source()
+        if source.lower().startswith('file:///'):
+            return self._display_file_uri_source(source)
+        return source
+
+    def _display_file_uri_source(self, source):
+        parsed = urlsplit(source)
+        path = unquote(parsed.path)
+        if re.match(r'^/[A-Za-z]:/', path):
+            path = path[1:]
+        path = path.replace('/', os.sep)
+
+        query = unquote(parsed.query)
+        if query:
+            return '{0}?{1}'.format(path, query)
+        return path
 
     def _handle_item_changed(self, item, column):
         if self._changing_checks or column != 0:
@@ -240,23 +267,32 @@ class MapSharingLayerSelectionDialog(QDialog):
 class MapSharingDialog(QDialog):
     """Choose package export or import."""
 
-    def __init__(self, export_callback, import_callback, parent=None):
+    def __init__(self, export_callback, import_callback, parent=None, language_changed_callback=None):
         super().__init__(parent)
         self.export_callback = export_callback
         self.import_callback = import_callback
+        self.language_changed_callback = language_changed_callback
+        self.translatable_rows = []
 
         plugin_icon = QIcon(os.path.join(os.path.dirname(__file__), 'icon.png'))
-        self.setWindowTitle('koji_MapBundle')
+        self.setWindowTitle(i18n.tr('main_title'))
         self.setWindowIcon(plugin_icon)
         self.setMinimumWidth(dpi_px(500))
         self.resize(dpi_px(620), dpi_px(430))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(dpi_px(18), dpi_px(18), dpi_px(18), dpi_px(18))
-        layout.setSpacing(dpi_px(12))
+        layout.setSpacing(dpi_px(6))
 
-        title_row = QHBoxLayout()
+        header = QFrame()
+        header.setFrameShape(QFrame.NoFrame)
+        header.setFixedHeight(dpi_px(48))
+        header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        title_row = QHBoxLayout(header)
+        title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(dpi_px(10))
+        title_row.setAlignment(Qt.AlignTop)
 
         brand_icon = QLabel()
         brand_pixmap = plugin_icon.pixmap(dpi_px(30), dpi_px(30))
@@ -267,29 +303,57 @@ class MapSharingDialog(QDialog):
         title_block = QVBoxLayout()
         title_block.setContentsMargins(0, 0, 0, 0)
         title_block.setSpacing(dpi_px(1))
+        title_block.setAlignment(Qt.AlignTop)
 
-        title = QLabel('koji_MapBundle')
-        title_font = title.font()
+        self.title_label = QLabel()
+        title_font = self.title_label.font()
         title_font.setPointSize(15)
         title_font.setBold(True)
-        title.setFont(title_font)
-        title.setStyleSheet('color: #183a2f; letter-spacing: 0px;')
+        self.title_label.setFont(title_font)
+        self.title_label.setStyleSheet('color: #183a2f; letter-spacing: 0px;')
+        self.title_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-        lead = QLabel('地図バンドルを書き出し・読み込みします。')
-        lead.setStyleSheet('color: #66726c;')
+        self.lead_label = QLabel()
+        self.lead_label.setStyleSheet('color: #66726c;')
+        self.lead_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-        metrics_label = QLabel(display_metrics_text())
-        metrics_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        metrics_label.setStyleSheet('color: #66726c;')
+        self.metrics_label = QLabel(display_metrics_text())
+        self.metrics_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.metrics_label.setStyleSheet('color: #66726c;')
+        self.metrics_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-        title_block.addWidget(title)
-        title_block.addWidget(lead)
+        language_row = QHBoxLayout()
+        language_row.setSpacing(dpi_px(6))
+        language_row.setAlignment(Qt.AlignRight)
+        self.language_label = QLabel()
+        self.language_label.setStyleSheet('color: #66726c;')
+        self.language_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.language_combo = QComboBox()
+        self.language_combo.addItem('日本語', 'ja')
+        self.language_combo.addItem('English', 'en')
+        self.language_combo.setFixedWidth(dpi_px(118))
+        self.language_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.language_combo.currentIndexChanged.connect(self._handle_language_combo_changed)
+        language_row.addWidget(self.language_label)
+        language_row.addWidget(self.language_combo)
 
-        title_row.addWidget(brand_icon)
+        status_block = QVBoxLayout()
+        status_block.setContentsMargins(0, 0, 0, 0)
+        status_block.setSpacing(dpi_px(4))
+        status_block.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        status_block.addWidget(self.metrics_label, 0, Qt.AlignRight)
+        status_block.addLayout(language_row)
+
+        title_block.addWidget(self.title_label)
+        title_block.addWidget(self.lead_label)
+
+        title_row.addWidget(brand_icon, 0, Qt.AlignTop)
         title_row.addLayout(title_block)
         title_row.addStretch(1)
-        title_row.addWidget(metrics_label)
-        layout.addLayout(title_row)
+        title_row.addLayout(status_block)
+        title_row.setAlignment(status_block, Qt.AlignRight | Qt.AlignTop)
+        title_row.setAlignment(title_block, Qt.AlignTop)
+        layout.addWidget(header)
 
         accent_line = QFrame()
         accent_line.setFixedHeight(dpi_px(2))
@@ -298,23 +362,53 @@ class MapSharingDialog(QDialog):
 
         icons_dir = os.path.join(os.path.dirname(__file__), 'icons')
         layout.addWidget(self._create_action_row(
-            '地図バンドルを書き出し',
-            '選択したレイヤ、スタイル、シンボル、レイアウトをZIP形式の地図バンドルとして保存します。',
+            'export_action',
+            'export_description',
             os.path.join(icons_dir, 'map_bundle_export.png'),
             self.export_callback,
         ))
         layout.addWidget(self._create_action_row(
-            '地図バンドルを読み込み',
-            '受け取った地図バンドルを展開し、GeoPackageをプロジェクトフォルダに保存してレイヤを追加します。',
+            'import_action',
+            'import_description',
             os.path.join(icons_dir, 'map_bundle_import.png'),
             self.import_callback,
         ))
 
-        button_box = QDialogButtonBox(QDialogButtonBox.Close)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Close)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
+        self._apply_language()
 
-    def _create_action_row(self, text, description, icon_path, callback):
+    def _handle_language_combo_changed(self, index):
+        language = self.language_combo.itemData(index)
+        if language:
+            self._set_language(language)
+
+    def _set_language(self, language):
+        if language == i18n.current_language():
+            return
+        i18n.set_language(language)
+        self._apply_language()
+        if self.language_changed_callback is not None:
+            self.language_changed_callback()
+
+    def _apply_language(self):
+        self.setWindowTitle(i18n.tr('main_title'))
+        self.title_label.setText(i18n.tr('main_title'))
+        self.lead_label.setText(i18n.tr('main_lead'))
+        for name_label, name_key, description_label, description_key in self.translatable_rows:
+            name_label.setText(i18n.tr(name_key))
+            description_label.setText(i18n.tr(description_key))
+        current_language = i18n.current_language()
+        self.language_label.setText(i18n.tr('language_setting'))
+        combo_index = self.language_combo.findData(current_language)
+        if combo_index >= 0 and self.language_combo.currentIndex() != combo_index:
+            self.language_combo.blockSignals(True)
+            self.language_combo.setCurrentIndex(combo_index)
+            self.language_combo.blockSignals(False)
+        self.button_box.button(QDialogButtonBox.Close).setText(i18n.tr('close'))
+
+    def _create_action_row(self, text_key, description_key, icon_path, callback):
         row = QPushButton()
         row.setMinimumHeight(dpi_px(118))
         row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
@@ -345,9 +439,9 @@ class MapSharingDialog(QDialog):
         text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(dpi_px(4))
 
-        name_label = QLabel(text)
+        name_label = QLabel(i18n.tr(text_key))
         name_label.setStyleSheet('font-weight: 600;')
-        description_label = QLabel(description)
+        description_label = QLabel(i18n.tr(description_key))
         description_label.setWordWrap(True)
         description_label.setMinimumHeight(description_label.fontMetrics().lineSpacing() * 3 + dpi_px(6))
         description_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
@@ -355,6 +449,7 @@ class MapSharingDialog(QDialog):
         text_layout.addWidget(name_label)
         text_layout.addWidget(description_label)
         row_layout.addLayout(text_layout, 1)
+        self.translatable_rows.append((name_label, text_key, description_label, description_key))
         return row
 
 
@@ -365,7 +460,7 @@ class MapSharingPackagePreviewDialog(QDialog):
         super().__init__(parent)
         self.manifest = manifest
 
-        self.setWindowTitle('地図バンドルから読み込むものを選択')
+        self.setWindowTitle(i18n.tr('package_preview_title'))
         self.resize(820, 560)
         self._changing_checks = False
 
@@ -373,30 +468,26 @@ class MapSharingPackagePreviewDialog(QDialog):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(10)
 
-        package_name = manifest.get('package_name') or '名称未設定'
+        package_name = manifest.get('package_name') or i18n.tr('unnamed')
         layers = manifest.get('layers', [])
         layouts = manifest.get('layouts', [])
-        title = QLabel('地図バンドルから読み込むものを選択')
+        title = QLabel(i18n.tr('package_preview_title'))
         title.setStyleSheet('font-size: 18px; font-weight: 600;')
         layout.addWidget(title)
 
         summary = QLabel(
-            'バンドル名: {0} / レイヤ数: {1} / レイアウト数: {2}'.format(
-                package_name,
-                len(layers),
-                len(layouts),
-            )
+            i18n.tr('package_summary', package_name=package_name, layer_count=len(layers), layout_count=len(layouts))
         )
         summary.setWordWrap(True)
         layout.addWidget(summary)
 
-        guide = QLabel('読み込むレイヤとレイアウトにチェックを入れてください。チェックを外したものは読み込みません。')
+        guide = QLabel(i18n.tr('package_preview_guide'))
         guide.setWordWrap(True)
         layout.addWidget(guide)
 
         toolbar = QHBoxLayout()
-        select_all_button = QPushButton('すべて選択')
-        clear_button = QPushButton('選択解除')
+        select_all_button = QPushButton(i18n.tr('select_all'))
+        clear_button = QPushButton(i18n.tr('clear_selection'))
         select_all_button.clicked.connect(lambda: self._set_all_checked(True))
         clear_button.clicked.connect(lambda: self._set_all_checked(False))
         toolbar.addWidget(select_all_button)
@@ -406,7 +497,7 @@ class MapSharingPackagePreviewDialog(QDialog):
 
         self.tree = QTreeWidget()
         self.tree.setColumnCount(4)
-        self.tree.setHeaderLabels(['読み込む項目', '種類', 'データ', 'スタイル'])
+        self.tree.setHeaderLabels([i18n.tr('import_item'), i18n.tr('type'), i18n.tr('data'), i18n.tr('style')])
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.tree.header().setSectionResizeMode(2, QHeaderView.Stretch)
@@ -420,8 +511,8 @@ class MapSharingPackagePreviewDialog(QDialog):
         self.tree.expandAll()
 
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.button(QDialogButtonBox.Ok).setText('チェックしたものを読み込む')
-        button_box.button(QDialogButtonBox.Cancel).setText('キャンセル')
+        button_box.button(QDialogButtonBox.Ok).setText(i18n.tr('import_checked'))
+        button_box.button(QDialogButtonBox.Cancel).setText(i18n.tr('cancel'))
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
@@ -442,24 +533,24 @@ class MapSharingPackagePreviewDialog(QDialog):
                 path_key.append(group_name)
                 key = tuple(path_key)
                 if key not in group_items:
-                    group_items[key] = QTreeWidgetItem(parent_item, [group_name, 'フォルダ', '', ''])
+                    group_items[key] = QTreeWidgetItem(parent_item, [group_name, i18n.tr('folder'), '', ''])
                     self._make_checkable_group_item(group_items[key])
                 parent_item = group_items[key]
 
-            layer_type = layer_info.get('type') or ('ベクタ' if layer_info.get('path') else 'ラスタ')
+            layer_type = layer_info.get('type') or (i18n.tr('vector') if layer_info.get('path') else i18n.tr('raster'))
             if layer_type == 'vector':
-                display_type = 'ベクタ'
+                display_type = i18n.tr('vector')
                 data_value = layer_info.get('path', '')
             elif layer_type == 'raster':
-                display_type = 'ラスタ/XYZ'
+                display_type = i18n.tr('raster')
                 data_value = layer_info.get('source', '')
             else:
                 display_type = layer_type
                 data_value = layer_info.get('path') or layer_info.get('source') or ''
 
-            style_value = 'あり' if layer_info.get('style') else 'なし'
+            style_value = i18n.tr('yes') if layer_info.get('style') else i18n.tr('no')
             item = QTreeWidgetItem(parent_item, [
-                layer_info.get('name') or layer_info.get('layername') or '名称未設定',
+                layer_info.get('name') or layer_info.get('layername') or i18n.tr('unnamed'),
                 display_type,
                 data_value,
                 style_value,
@@ -473,12 +564,12 @@ class MapSharingPackagePreviewDialog(QDialog):
         if not layouts:
             return
 
-        layouts_item = QTreeWidgetItem(self.tree.invisibleRootItem(), ['レイアウト', 'フォルダ', '', ''])
+        layouts_item = QTreeWidgetItem(self.tree.invisibleRootItem(), [i18n.tr('layout'), i18n.tr('folder'), '', ''])
         self._make_checkable_group_item(layouts_item)
         for index, layout_info in enumerate(layouts):
             item = QTreeWidgetItem(layouts_item, [
-                layout_info.get('name') or '名称未設定',
-                'レイアウト',
+                layout_info.get('name') or i18n.tr('unnamed'),
+                i18n.tr('layout'),
                 layout_info.get('path') or '',
                 '',
             ])
@@ -570,34 +661,37 @@ class MapSharingLayoutImportDialog(QDialog):
     def __init__(self, layouts, parent=None):
         super().__init__(parent)
         self.layouts = layouts
-        self.setWindowTitle('レイアウトの取り込み設定')
+        self.setWindowTitle(i18n.tr('layout_import_title'))
         self.resize(720, 420)
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(18, 18, 18, 18)
         main_layout.setSpacing(10)
 
-        title = QLabel('取り込むレイアウトを選択し、必要に応じて名前を変更してください。')
+        title = QLabel(
+            i18n.tr('layout_import_lead')
+        )
         title.setWordWrap(True)
         main_layout.addWidget(title)
 
         existing_names = [layout.name() for layout in QgsProject.instance().layoutManager().layouts()]
         existing_label = QLabel(
-            '既存レイアウト: {0}'.format(', '.join(existing_names) if existing_names else 'なし')
+            i18n.tr('existing_layouts', names=', '.join(existing_names) if existing_names else i18n.tr('none'))
         )
         existing_label.setWordWrap(True)
         main_layout.addWidget(existing_label)
 
         self.table = QTableWidget(len(layouts), 3)
-        self.table.setHorizontalHeaderLabels(['取り込む', '元の名前', '取り込み後の名前'])
+        self.table.setHorizontalHeaderLabels([i18n.tr('import_column'), i18n.tr('original_name'), i18n.tr('import_name')])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
         main_layout.addWidget(self.table, 1)
 
+        used_names = set(existing_names)
         for row, layout_info in enumerate(layouts):
-            original_name = layout_info.get('name') or '地図バンドルレイアウト'
+            original_name = layout_info.get('name') or i18n.tr('default_layout_name')
             import_item = QTableWidgetItem('')
             import_item.setFlags(import_item.flags() | Qt.ItemIsUserCheckable)
             import_item.setCheckState(Qt.Checked)
@@ -607,12 +701,12 @@ class MapSharingLayoutImportDialog(QDialog):
             original_item.setFlags(original_item.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(row, 1, original_item)
 
-            name_item = QTableWidgetItem(self._default_import_name(original_name, existing_names))
+            name_item = QTableWidgetItem(self._default_import_name(original_name, used_names))
             self.table.setItem(row, 2, name_item)
 
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.button(QDialogButtonBox.Ok).setText('取り込む')
-        button_box.button(QDialogButtonBox.Cancel).setText('キャンセル')
+        button_box.button(QDialogButtonBox.Ok).setText(i18n.tr('import'))
+        button_box.button(QDialogButtonBox.Cancel).setText(i18n.tr('cancel'))
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         main_layout.addWidget(button_box)
@@ -632,19 +726,24 @@ class MapSharingLayoutImportDialog(QDialog):
             selected.append(updated_info)
         return selected
 
-    def _default_import_name(self, original_name, existing_names):
-        if original_name not in existing_names:
-            return original_name
-        return original_name + '_取り込み'
+    def _default_import_name(self, original_name, used_names):
+        candidate = original_name
+        suffix = 2
+        while candidate in used_names:
+            candidate = '{0}_{1}'.format(original_name, suffix)
+            suffix += 1
+        used_names.add(candidate)
+        return candidate
 
 
 class MapSharingTool:
-    """Export and import koji_MapBundle ZIP packages."""
+    """Export and import koji MapBundle ZIP packages."""
 
-    def __init__(self, iface):
+    def __init__(self, iface, language_changed_callback=None):
         self.iface = iface
         self.dlg = None
         self.plugin_dir = os.path.dirname(__file__)
+        self.language_changed_callback = language_changed_callback
 
     def run(self):
         if self.dlg is None:
@@ -652,6 +751,7 @@ class MapSharingTool:
                 self.export_package,
                 self.import_package,
                 self.iface.mainWindow(),
+                self.language_changed_callback,
             )
 
         self.dlg.show()
@@ -660,24 +760,20 @@ class MapSharingTool:
 
     def export_package(self):
         project = QgsProject.instance()
-        available_layers = [
-            layer
-            for layer in project.mapLayers().values()
-            if layer.type() in (QgsMapLayer.VectorLayer, QgsMapLayer.RasterLayer) and layer.isValid()
-        ]
+        available_layers = self._project_layers_in_tree_order(project)
         available_layouts = project.layoutManager().layouts()
         if not available_layers and not available_layouts:
             QMessageBox.warning(
                 self.iface.mainWindow(),
-                '地図バンドル',
-                '書き出せるレイヤまたはレイアウトがありません。',
+                i18n.tr('tool_title'),
+                i18n.tr('no_export_items'),
             )
             return
 
         selection_dialog = MapSharingLayerSelectionDialog(
             available_layers,
             available_layouts,
-            self._selected_layer_ids(),
+            self._visible_layer_ids(available_layers),
             self.iface.mainWindow(),
         )
         if selection_dialog.exec_() != QDialog.Accepted:
@@ -688,17 +784,17 @@ class MapSharingTool:
         if not layers and not layouts:
             QMessageBox.warning(
                 self.iface.mainWindow(),
-                '地図バンドル',
-                '地図バンドルに入れるレイヤまたはレイアウトを1つ以上選択してください。',
+                i18n.tr('tool_title'),
+                i18n.tr('select_export_items_warning'),
             )
             return
 
-        default_name = '地図バンドル.zip'
+        default_name = i18n.tr('default_zip_name')
         zip_path, _ = QFileDialog.getSaveFileName(
             self.iface.mainWindow(),
-            '地図バンドルを書き出し',
+            i18n.tr('export_file_title'),
             default_name,
-            '地図バンドル (*.zip);;All files (*.*)',
+            i18n.tr('zip_filter'),
         )
         if not zip_path:
             return
@@ -710,22 +806,22 @@ class MapSharingTool:
                 self._build_package(temp_dir, zip_path, layers, layouts)
             QMessageBox.information(
                 self.iface.mainWindow(),
-                '地図バンドル',
-                '地図バンドルを書き出しました。\n{0}'.format(zip_path),
+                i18n.tr('tool_title'),
+                i18n.tr('export_success', path=zip_path),
             )
         except Exception as exc:  # pragma: no cover - shown inside QGIS
             QMessageBox.critical(
                 self.iface.mainWindow(),
-                '地図バンドル',
-                '地図バンドルの書き出しに失敗しました。\n{0}'.format(exc),
+                i18n.tr('tool_title'),
+                i18n.tr('export_failed', error=exc),
             )
 
     def import_package(self):
         zip_path, _ = QFileDialog.getOpenFileName(
             self.iface.mainWindow(),
-            '地図バンドルを読み込み',
+            i18n.tr('import_file_title'),
             '',
-            '地図バンドル (*.zip);;All files (*.*)',
+            i18n.tr('zip_filter'),
         )
         if not zip_path:
             return
@@ -737,8 +833,8 @@ class MapSharingTool:
         except Exception as exc:  # pragma: no cover - shown inside QGIS
             QMessageBox.critical(
                 self.iface.mainWindow(),
-                '地図バンドル',
-                '地図バンドルの読み込みに失敗しました。\n{0}'.format(exc),
+                i18n.tr('tool_title'),
+                i18n.tr('import_failed', error=exc),
             )
 
     def _build_package(self, temp_dir, zip_path, layers, layouts=None):
@@ -753,7 +849,7 @@ class MapSharingTool:
 
         project = QgsProject.instance()
         manifest = {
-            'package_name': self._safe_name(project.baseName() or 'koji_MapBundle_package'),
+            'package_name': project.baseName() or 'koji MapBundle package',
             'package_type': 'layer_package',
             'created_at': datetime.now().isoformat(timespec='seconds'),
             'layers': [],
@@ -827,7 +923,7 @@ class MapSharingTool:
     def _load_package_directory(self, package_dir, zip_path=None):
         manifest_path = os.path.join(package_dir, 'manifest.json')
         if not os.path.exists(manifest_path):
-            raise ValueError('選択したフォルダに manifest.json がありません。')
+            raise ValueError(i18n.tr('manifest_missing'))
 
         with open(manifest_path, 'r', encoding='utf-8') as manifest_file:
             manifest = json.load(manifest_file)
@@ -839,8 +935,8 @@ class MapSharingTool:
         if not manifest.get('layers') and not manifest.get('layouts'):
             QMessageBox.warning(
                 self.iface.mainWindow(),
-                '地図バンドル',
-                '読み込むレイヤまたはレイアウトを1つ以上選択してください。',
+                i18n.tr('tool_title'),
+                i18n.tr('select_import_items_warning'),
             )
             return
 
@@ -855,14 +951,15 @@ class MapSharingTool:
             if not manifest.get('layers') and not manifest.get('layouts'):
                 QMessageBox.warning(
                     self.iface.mainWindow(),
-                    '地図バンドル',
-                    '読み込むレイヤまたはレイアウトを1つ以上選択してください。',
+                    i18n.tr('tool_title'),
+                    i18n.tr('select_import_items_warning'),
                 )
                 return
 
-        project_package_dir = self._copy_package_to_project_storage(package_dir, manifest, zip_path)
-        if project_package_dir is None:
+        copy_result = self._copy_package_to_project_storage(package_dir, manifest, zip_path)
+        if copy_result is None:
             return
+        project_package_dir, path_overrides = copy_result
 
         destination_group = self._ask_import_group(manifest)
         if destination_group is None:
@@ -872,16 +969,29 @@ class MapSharingTool:
             project_package_dir,
             manifest,
             destination_group,
+            path_overrides,
         )
         loaded_layout_count = self._load_layout_templates(project_package_dir, manifest)
+        preserved_auxiliary_dir = self._cleanup_import_auxiliary_files(project_package_dir)
+        storage_message = ''
+        saved_gpkg_paths = sorted(set(path_overrides.values()))
+        if saved_gpkg_paths:
+            storage_message = 'GeoPackage: {0}'.format('\nGeoPackage: '.join(saved_gpkg_paths))
+        if preserved_auxiliary_dir:
+            auxiliary_message = i18n.tr('svg_symbols', path=preserved_auxiliary_dir)
+            storage_message = (
+                '{0}\n{1}'.format(storage_message, auxiliary_message)
+                if storage_message else auxiliary_message
+            )
+        if not storage_message:
+            storage_message = i18n.tr('style_layout_imported')
+        project_save_message = self._ask_save_project_after_import()
+        if project_save_message:
+            storage_message = '{0}\n{1}'.format(storage_message, project_save_message)
         QMessageBox.information(
             self.iface.mainWindow(),
-            '地図バンドル',
-            '{0} レイヤ、{1} レイアウトを読み込みました。\n保存先: {2}'.format(
-                loaded_count,
-                loaded_layout_count,
-                project_package_dir,
-            ),
+            i18n.tr('tool_title'),
+            i18n.tr('import_success', layer_count=loaded_count, layout_count=loaded_layout_count, message=storage_message),
         )
 
     def _filter_manifest_by_preview_selection(self, manifest, preview_dialog):
@@ -904,79 +1014,95 @@ class MapSharingTool:
         return filtered_manifest
 
     def _copy_package_to_project_storage(self, package_dir, manifest, zip_path=None):
-        storage_dir = self._project_package_storage_dir(manifest, zip_path)
+        gpkg_rel_paths = self._imported_geopackage_rel_paths(manifest)
+        gpkg_save_path = None
+        if gpkg_rel_paths:
+            gpkg_save_path = self._ask_imported_geopackage_path(manifest, zip_path)
+            if gpkg_save_path is None:
+                return None
+
+        storage_dir = self._project_package_storage_dir(manifest, zip_path, gpkg_save_path)
         if storage_dir is None:
             return None
 
         if os.path.exists(storage_dir):
             shutil.rmtree(storage_dir)
         shutil.copytree(package_dir, storage_dir)
-        if not self._rename_imported_geopackages(storage_dir, manifest):
-            return None
-        return storage_dir
 
-    def _rename_imported_geopackages(self, storage_dir, manifest):
+        path_overrides = {}
+        if gpkg_rel_paths:
+            path_overrides = self._move_imported_geopackages(
+                storage_dir,
+                manifest,
+                gpkg_rel_paths,
+                gpkg_save_path,
+            )
+        return storage_dir, path_overrides
+
+    def _imported_geopackage_rel_paths(self, manifest):
         gpkg_rel_paths = []
         for layer_info in manifest.get('layers', []):
             rel_path = layer_info.get('path')
             if rel_path and rel_path.lower().endswith('.gpkg') and rel_path not in gpkg_rel_paths:
                 gpkg_rel_paths.append(rel_path)
+        return gpkg_rel_paths
 
-        if not gpkg_rel_paths:
-            return True
-
-        gpkg_name, accepted = QInputDialog.getText(
+    def _ask_imported_geopackage_path(self, manifest, zip_path=None):
+        default_path = self._default_imported_geopackage_path(manifest, zip_path)
+        gpkg_path, _ = QFileDialog.getSaveFileName(
             self.iface.mainWindow(),
-            'GeoPackage名',
-            '保存するGeoPackage名:',
-            QLineEdit.Normal,
-            'MapBundle',
+            i18n.tr('save_gpkg_title'),
+            default_path,
+            i18n.tr('gpkg_filter'),
         )
-        if not accepted:
-            return False
+        if not gpkg_path:
+            return None
+        if not gpkg_path.lower().endswith('.gpkg'):
+            gpkg_path += '.gpkg'
+        return os.path.normpath(gpkg_path)
 
-        gpkg_name = gpkg_name.strip()
-        if gpkg_name.lower().endswith('.gpkg'):
-            gpkg_name = gpkg_name[:-5]
-        gpkg_name = (self._safe_name(gpkg_name) or 'MapBundle') + '.gpkg'
+    def _default_imported_geopackage_path(self, manifest, zip_path=None):
+        return os.path.join(self._default_import_root_dir(), 'map_bundle_file.gpkg')
 
-        rel_path_map = {}
+    def _move_imported_geopackages(self, storage_dir, manifest, gpkg_rel_paths, gpkg_save_path):
+        path_overrides = {}
         used_names = set()
+        target_dir = os.path.dirname(gpkg_save_path)
+        os.makedirs(target_dir, exist_ok=True)
+        selected_base_name, selected_extension = os.path.splitext(os.path.basename(gpkg_save_path))
+        selected_extension = selected_extension or '.gpkg'
+
         for index, rel_path in enumerate(gpkg_rel_paths, start=1):
             source_path = os.path.normpath(os.path.join(storage_dir, rel_path))
             self._assert_inside_directory(storage_dir, source_path)
             if not os.path.exists(source_path):
-                raise ValueError('GeoPackageが見つかりません: {0}'.format(rel_path))
+                raise ValueError(i18n.tr('gpkg_missing', path=rel_path))
 
-            target_name = gpkg_name
+            target_name = os.path.basename(gpkg_save_path)
             if len(gpkg_rel_paths) > 1:
-                base_name, extension = os.path.splitext(gpkg_name)
-                target_name = '{0}_{1}{2}'.format(base_name, index, extension or '.gpkg')
-            target_name = self._unique_name(os.path.splitext(target_name)[0], used_names) + '.gpkg'
-            target_rel_path = 'data/{0}'.format(target_name)
-            target_path = os.path.normpath(os.path.join(storage_dir, target_rel_path))
-            self._assert_inside_directory(storage_dir, target_path)
-            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                target_name = '{0}_{1}{2}'.format(selected_base_name, index, selected_extension)
+            target_name = self._unique_name(os.path.splitext(target_name)[0], used_names) + selected_extension
+            target_path = os.path.normpath(os.path.join(target_dir, target_name))
 
             if os.path.abspath(source_path) != os.path.abspath(target_path):
                 if os.path.exists(target_path):
                     os.remove(target_path)
                 shutil.move(source_path, target_path)
-            rel_path_map[rel_path] = target_rel_path
+            path_overrides[rel_path] = target_path
 
         for layer_info in manifest.get('layers', []):
             rel_path = layer_info.get('path')
-            if rel_path in rel_path_map:
-                layer_info['path'] = rel_path_map[rel_path]
+            if rel_path in path_overrides:
+                layer_info['saved_path'] = path_overrides[rel_path]
 
         manifest_path = os.path.join(storage_dir, 'manifest.json')
         with open(manifest_path, 'w', encoding='utf-8') as manifest_file:
             json.dump(manifest, manifest_file, ensure_ascii=False, indent=2)
             manifest_file.write('\n')
-        return True
+        return path_overrides
 
-    def _project_package_storage_dir(self, manifest, zip_path=None):
-        root_dir = self._project_bundle_root()
+    def _project_package_storage_dir(self, manifest, zip_path=None, gpkg_save_path=None):
+        root_dir = os.path.dirname(gpkg_save_path) if gpkg_save_path else self._default_import_root_dir()
         if root_dir is None:
             return None
 
@@ -986,23 +1112,80 @@ class MapSharingTool:
             or 'package'
         )
         package_name = self._safe_name(package_name) or 'package'
-        folder_name = '{0}_{1}'.format(package_name, datetime.now().strftime('%Y%m%d_%H%M%S'))
+        folder_name = '{0}_map_bundle_files_{1}'.format(
+            package_name,
+            datetime.now().strftime('%Y%m%d_%H%M%S'),
+        )
         return os.path.join(root_dir, folder_name)
 
-    def _project_bundle_root(self):
+    def _default_import_root_dir(self):
         project = QgsProject.instance()
         project_dir = project.absolutePath()
+        if project_dir and os.path.exists(project_dir):
+            return project_dir
 
-        if not project_dir or not os.path.exists(project_dir):
-            project_dir = QFileDialog.getExistingDirectory(
+        documents_dir = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+        if documents_dir:
+            return documents_dir
+        home_documents_dir = os.path.join(os.path.expanduser('~'), 'Documents')
+        if os.path.exists(home_documents_dir):
+            return home_documents_dir
+        return os.path.expanduser('~')
+
+    def _cleanup_import_auxiliary_files(self, package_dir):
+        symbols_dir = os.path.join(package_dir, 'symbols')
+        preserved_symbols = self._directory_has_files(symbols_dir)
+
+        for name in ('styles', 'layouts', 'data'):
+            path = os.path.join(package_dir, name)
+            if os.path.exists(path):
+                shutil.rmtree(path)
+
+        manifest_path = os.path.join(package_dir, 'manifest.json')
+        if os.path.exists(manifest_path):
+            os.remove(manifest_path)
+
+        if preserved_symbols:
+            return symbols_dir
+
+        if os.path.exists(symbols_dir):
+            shutil.rmtree(symbols_dir)
+        if os.path.exists(package_dir) and not os.listdir(package_dir):
+            os.rmdir(package_dir)
+        return None
+
+    def _ask_save_project_after_import(self):
+        project = QgsProject.instance()
+        project_path = project.fileName()
+        if not project_path:
+            QMessageBox.information(
                 self.iface.mainWindow(),
-                'GeoPackageを保存するフォルダを選択',
-                os.path.expanduser('~'),
+                i18n.tr('tool_title'),
+                i18n.tr('project_unsaved_notice'),
             )
-            if not project_dir:
-                return None
+            return i18n.tr('project_unsaved_status')
 
-        return project_dir
+        result = QMessageBox.question(
+            self.iface.mainWindow(),
+            i18n.tr('save_project_title'),
+            i18n.tr('save_project_question', path=project_path),
+            QMessageBox.Ok | QMessageBox.Cancel,
+            QMessageBox.Ok,
+        )
+        if result != QMessageBox.Ok:
+            return i18n.tr('project_not_saved_status')
+
+        if not project.write():
+            raise RuntimeError(i18n.tr('project_save_failed', path=project_path))
+        return i18n.tr('project_saved_status')
+
+    def _directory_has_files(self, directory):
+        if not os.path.isdir(directory):
+            return False
+        for _, _, file_names in os.walk(directory):
+            if file_names:
+                return True
+        return False
 
     def _load_layout_templates(self, package_dir, manifest):
         layouts = manifest.get('layouts', [])
@@ -1019,7 +1202,7 @@ class MapSharingTool:
             template_path = os.path.normpath(os.path.join(package_dir, rel_path))
             self._assert_inside_directory(package_dir, template_path)
             if not os.path.exists(template_path):
-                raise ValueError('レイアウトテンプレートが見つかりません: {0}'.format(rel_path))
+                raise ValueError(i18n.tr('layout_template_missing', path=rel_path))
 
             with open(template_path, 'r', encoding='utf-8') as template_file:
                 template_text = template_file.read()
@@ -1031,13 +1214,13 @@ class MapSharingTool:
             else:
                 set_content_ok = bool(set_content_result)
             if not set_content_ok:
-                raise ValueError('レイアウトテンプレートを読み込めません: {0}'.format(rel_path))
+                raise ValueError(i18n.tr('layout_template_load_failed', path=rel_path))
 
             layout = QgsPrintLayout(QgsProject.instance())
             layout.initializeDefaults()
             layout.loadFromTemplate(document, QgsReadWriteContext())
             layout.setName(self._unique_layout_name(
-                layout_info.get('import_name') or layout_info.get('name') or '地図バンドルレイアウト'
+                layout_info.get('import_name') or layout_info.get('name') or i18n.tr('default_layout_name')
             ))
             manager.addLayout(layout)
             loaded_count += 1
@@ -1062,7 +1245,7 @@ class MapSharingTool:
     def _load_manifest_layers(self, package_dir, manifest, destination_group=None, path_overrides=None):
         layers = manifest.get('layers', [])
         if not isinstance(layers, list):
-            raise ValueError('manifest.json の layers が配列ではありません。')
+            raise ValueError(i18n.tr('layers_not_array'))
 
         root = QgsProject.instance().layerTreeRoot()
         loaded_count = 0
@@ -1094,16 +1277,17 @@ class MapSharingTool:
                 continue
 
             if not layer.isValid():
-                raise ValueError('レイヤを読み込めません: {0}'.format(layer_name))
+                raise ValueError(i18n.tr('layer_load_failed', name=layer_name))
 
             style_rel_path = layer_info.get('style')
             if style_rel_path:
                 style_path = os.path.normpath(os.path.join(package_dir, style_rel_path))
                 self._assert_inside_directory(package_dir, style_path)
                 if os.path.exists(style_path):
+                    self._make_style_svg_paths_absolute(style_path)
                     style_result = layer.loadNamedStyle(style_path)
                     if isinstance(style_result, tuple) and len(style_result) > 1 and not style_result[1]:
-                        raise ValueError('スタイルを読み込めません: {0}'.format(style_rel_path))
+                        raise ValueError(i18n.tr('style_load_failed', path=style_rel_path))
                     layer.triggerRepaint()
 
             QgsProject.instance().addMapLayer(layer, False)
@@ -1121,6 +1305,26 @@ class MapSharingTool:
             loaded_count += 1
 
         return loaded_count
+
+    def _make_style_svg_paths_absolute(self, qml_path):
+        with open(qml_path, 'r', encoding='utf-8', errors='ignore') as qml_file:
+            qml_text = qml_file.read()
+
+        replacements = {}
+        for match in re.findall(r'["\']([^"\']+\.svg)["\']', qml_text, flags=re.IGNORECASE):
+            if os.path.isabs(match):
+                continue
+            svg_path = os.path.normpath(os.path.join(os.path.dirname(qml_path), match))
+            if os.path.exists(svg_path):
+                replacements[match] = os.path.abspath(svg_path).replace(os.sep, '/')
+
+        if not replacements:
+            return
+
+        for old_path, new_path in replacements.items():
+            qml_text = qml_text.replace(old_path, new_path)
+        with open(qml_path, 'w', encoding='utf-8') as qml_file:
+            qml_file.write(qml_text)
 
     def _write_vector_layer(self, layer, gpkg_path, layer_name, create_file):
         options = QgsVectorFileWriter.SaveVectorOptions()
@@ -1140,7 +1344,7 @@ class MapSharingTool:
         error_code = result[0] if isinstance(result, tuple) else result
         if error_code != QgsVectorFileWriter.NoError:
             message = result[1] if isinstance(result, tuple) and len(result) > 1 else 'unknown error'
-            raise RuntimeError('レイヤを書き出せません: {0} ({1})'.format(layer.name(), message))
+            raise RuntimeError(i18n.tr('layer_export_failed', name=layer.name(), message=message))
 
     def _copy_svg_assets(self, qml_path, symbols_dir):
         if not os.path.exists(qml_path):
@@ -1174,50 +1378,44 @@ class MapSharingTool:
         base_dir = os.path.abspath(base_dir)
         path = os.path.abspath(path)
         if os.path.commonpath([base_dir, path]) != base_dir:
-            raise ValueError('地図バンドル外のパスは使用できません。')
+            raise ValueError(i18n.tr('outside_bundle_path'))
 
     def _layer_is_visible(self, layer):
         node = QgsProject.instance().layerTreeRoot().findLayer(layer.id())
         return True if node is None else node.isVisible()
 
-    def _selected_layer_ids(self):
-        selected_ids = set()
-        try:
-            layer_tree_view = self.iface.layerTreeView()
-            selected_layers = layer_tree_view.selectedLayers()
-        except Exception:
-            selected_layers = []
-            layer_tree_view = None
+    def _visible_layer_ids(self, layers):
+        return [layer.id() for layer in layers if self._layer_is_visible(layer)]
 
-        selected_ids.update(layer.id() for layer in selected_layers if layer is not None)
-        if layer_tree_view is not None and hasattr(layer_tree_view, 'selectedNodes'):
-            for node in layer_tree_view.selectedNodes():
-                self._collect_layer_ids_from_node(node, selected_ids)
-        return list(selected_ids)
+    def _project_layers_in_tree_order(self, project):
+        layers = []
+        added_ids = set()
+        self._collect_layers_in_tree_order(project.layerTreeRoot(), layers, added_ids)
 
-    def _selected_group_node(self):
-        try:
-            layer_tree_view = self.iface.layerTreeView()
-        except Exception:
-            return None
+        for layer in project.mapLayers().values():
+            if self._layer_can_be_bundled(layer) and layer.id() not in added_ids:
+                layers.append(layer)
+                added_ids.add(layer.id())
+        return layers
 
-        if not hasattr(layer_tree_view, 'selectedNodes'):
-            return None
-
-        for node in layer_tree_view.selectedNodes():
-            if self._is_group_node(node):
-                return node
-        return None
-
-    def _collect_layer_ids_from_node(self, node, selected_ids):
+    def _collect_layers_in_tree_order(self, node, layers, added_ids):
         if hasattr(node, 'layerId'):
-            layer_id = node.layerId()
-            if layer_id:
-                selected_ids.add(layer_id)
+            layer = QgsProject.instance().mapLayer(node.layerId())
+            if self._layer_can_be_bundled(layer) and layer.id() not in added_ids:
+                layers.append(layer)
+                added_ids.add(layer.id())
+            return
 
         if hasattr(node, 'children'):
             for child in node.children():
-                self._collect_layer_ids_from_node(child, selected_ids)
+                self._collect_layers_in_tree_order(child, layers, added_ids)
+
+    def _layer_can_be_bundled(self, layer):
+        return (
+            layer is not None
+            and layer.type() in (QgsMapLayer.VectorLayer, QgsMapLayer.RasterLayer)
+            and layer.isValid()
+        )
 
     def _is_group_node(self, node):
         return hasattr(node, 'children') and not hasattr(node, 'layerId')
@@ -1226,8 +1424,8 @@ class MapSharingTool:
         default_name = 'MapBundle'
         group_name, accepted = QInputDialog.getText(
             self.iface.mainWindow(),
-            'インポート先フォルダ名',
-            'レイヤパネルに作成するフォルダ名:',
+            i18n.tr('import_group_title'),
+            i18n.tr('import_group_label'),
             QLineEdit.Normal,
             default_name,
         )
@@ -1238,8 +1436,8 @@ class MapSharingTool:
         if not group_name:
             QMessageBox.warning(
                 self.iface.mainWindow(),
-                '地図バンドル',
-                'フォルダ名を入力してください。',
+                i18n.tr('tool_title'),
+                i18n.tr('group_name_required'),
             )
             return None
 

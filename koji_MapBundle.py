@@ -6,6 +6,7 @@ from qgis.PyQt.QtCore import QCoreApplication, QSettings, QTranslator
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMessageBox
 
+from . import koji_MapBundle_i18n as i18n
 from .koji_MapBundle_tool import MapSharingTool
 
 
@@ -17,7 +18,7 @@ class KojiMapBundle:
         self.plugin_dir = os.path.dirname(__file__)
         self.actions = []
         self.tool = None
-        self.menu_title = self.tr(u'&地図バンドル')
+        self.menu_title = i18n.tr('menu_title')
 
         locale = QSettings().value('locale/userLocale', '')[0:2]
         locale_path = os.path.join(
@@ -38,13 +39,25 @@ class KojiMapBundle:
         icon = QIcon(os.path.join(self.plugin_dir, 'icon.png'))
         self.main_action = QAction(
             icon,
-            self.tr(u'地図バンドル'),
+            i18n.tr('tool_title'),
             self.iface.mainWindow(),
         )
         self.main_action.triggered.connect(self.run)
         self.iface.addToolBarIcon(self.main_action)
         self.iface.addPluginToMenu(self.menu_title, self.main_action)
         self.actions.append(self.main_action)
+
+    def refresh_language(self):
+        old_menu_title = self.menu_title
+        self.menu_title = i18n.tr('menu_title')
+        if hasattr(self, 'main_action'):
+            self.main_action.setText(i18n.tr('tool_title'))
+            if old_menu_title != self.menu_title:
+                try:
+                    self.iface.removePluginMenu(old_menu_title, self.main_action)
+                    self.iface.addPluginToMenu(self.menu_title, self.main_action)
+                except Exception:
+                    pass
 
     def unload(self):
         for action in self.actions:
@@ -58,12 +71,12 @@ class KojiMapBundle:
     def run(self):
         try:
             if self.tool is None:
-                self.tool = MapSharingTool(self.iface)
+                self.tool = MapSharingTool(self.iface, self.refresh_language)
             self.tool.run()
         except Exception as exc:  # pragma: no cover - shown inside QGIS
             QMessageBox.critical(
                 self.iface.mainWindow(),
-                self.tr(u'地図バンドル'),
-                self.tr(u'Failed to start tool: {0}').format(exc),
+                i18n.tr('tool_title'),
+                i18n.tr('startup_failed', error=exc),
             )
 

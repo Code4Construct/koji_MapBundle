@@ -1,12 +1,12 @@
-﻿[general]
-name=koji_MapBundle
+[general]
+name=koji MapBundle
 qgisMinimumVersion=3.28
 description=Export and import QGIS layers, styles, symbols, and layouts as reusable map bundles.
 version=1.0.0
 author=Code4Construct
 email=ubonira@gmail.com
 changelog=1.0.0 - First stable public release for exporting and importing map bundles.
-about=koji_MapBundle packages selected QGIS layers, layer styles, SVG symbols, and print layouts into a ZIP file, and imports received bundles into the current project. Imported GeoPackage data is copied next to the current QGIS project file so project layers keep stable local data sources.
+about=koji MapBundle packages selected QGIS layers, layer styles, SVG symbols, and print layouts into a ZIP file, and imports received bundles into the current project. Imported GeoPackage data is copied next to the current QGIS project file so project layers keep stable local data sources.
 tracker=https://github.com/Code4Construct/koji_MapBundle/issues
 repository=https://github.com/Code4Construct/koji_MapBundle
 hasProcessingProvider=no

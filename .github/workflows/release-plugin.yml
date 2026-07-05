@@ -1,0 +1,210 @@
+name: VirusTotal Check and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to publish, for example v1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  PLUGIN_NAME: koji_MapBundle
+  ZIP_PATH: dist/koji_MapBundle.zip
+
+jobs:
+  release:
+    name: VirusTotal check and publish release
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build plugin ZIP
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File tools\build_plugin_zip.ps1
+
+      - name: Verify plugin ZIP
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+          if (-not (Test-Path "${{ env.ZIP_PATH }}")) {
+            throw "Plugin ZIP was not generated: ${{ env.ZIP_PATH }}"
+          }
+
+          $entries = [IO.Compression.ZipFile]::OpenRead((Resolve-Path "${{ env.ZIP_PATH }}")).Entries.FullName
+
+          $backslashEntries = $entries | Where-Object { $_ -match '\\' }
+          if ($backslashEntries) {
+            throw "ZIP contains backslashes in entry names, which QGIS plugin upload rejects: $($backslashEntries -join ', ')"
+          }
+
+          $required = @(
+            "${{ env.PLUGIN_NAME }}/metadata.txt",
+            "${{ env.PLUGIN_NAME }}/__init__.py",
+            "${{ env.PLUGIN_NAME }}/koji_MapBundle.py",
+            "${{ env.PLUGIN_NAME }}/icon.png"
+          )
+
+          foreach ($entry in $required) {
+            if ($entries -notcontains $entry) {
+              throw "Required ZIP entry was not found: $entry"
+            }
+          }
+
+          $blocked = $entries | Where-Object {
+            $_ -match '(^|/)__pycache__/' -or
+            $_ -match '\.py[co]$' -or
+            $_ -match '(^|/)\.git/' -or
+            $_ -match '(^|/)\.github/' -or
+            $_ -match 'ChatGPT Image'
+          }
+          if ($blocked) {
+            throw "ZIP contains files that should not be distributed: $($blocked -join ', ')"
+          }
+
+      - name: Calculate ZIP checksum
+        id: checksum
+        shell: powershell
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 "${{ env.ZIP_PATH }}").Hash.ToLowerInvariant()
+          "zip_sha256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "ZIP SHA256: $hash"
+
+      - name: Submit ZIP to VirusTotal
+        id: virustotal
+        shell: powershell
+        env:
+          VIRUSTOTAL_API_KEY: ${{ secrets.VIRUSTOTAL_API_KEY }}
+          ZIP_SHA256: ${{ steps.checksum.outputs.zip_sha256 }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:VIRUSTOTAL_API_KEY)) {
+            throw "VIRUSTOTAL_API_KEY secret is required to publish a release."
+          }
+
+          $zip = (Resolve-Path "${{ env.ZIP_PATH }}").Path
+          $uploadUrl = "https://www.virustotal.com/api/v3/files"
+          $zipSize = (Get-Item $zip).Length
+
+          if ($zipSize -gt 32MB) {
+            $uploadUrlResponse = & curl.exe --silent --show-error --request GET `
+              --url "https://www.virustotal.com/api/v3/files/upload_url" `
+              --header "x-apikey: $env:VIRUSTOTAL_API_KEY"
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "VirusTotal upload URL request failed with exit code $LASTEXITCODE"
+            }
+
+            $uploadUrlJson = $uploadUrlResponse | ConvertFrom-Json
+            $uploadUrl = $uploadUrlJson.data
+            if ([string]::IsNullOrWhiteSpace($uploadUrl)) {
+              throw "VirusTotal did not return an upload URL. Response: $uploadUrlResponse"
+            }
+          }
+
+          $response = & curl.exe --silent --show-error --request POST `
+            --url "$uploadUrl" `
+            --header "x-apikey: $env:VIRUSTOTAL_API_KEY" `
+            --form "file=@$zip"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "VirusTotal upload failed with exit code $LASTEXITCODE"
+          }
+
+          $json = $response | ConvertFrom-Json
+          $analysisId = $json.data.id
+          if ([string]::IsNullOrWhiteSpace($analysisId)) {
+            throw "VirusTotal did not return an analysis id. Response: $response"
+          }
+
+          $fileUrl = "https://www.virustotal.com/gui/file/$env:ZIP_SHA256/detection"
+          $analysisUrl = "https://www.virustotal.com/gui/analysis/$analysisId"
+
+          "analysis_id=$analysisId" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "file_url=$fileUrl" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "analysis_url=$analysisUrl" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Verify VirusTotal has no detections
+        id: vt_clean
+        shell: powershell
+        env:
+          VIRUSTOTAL_API_KEY: ${{ secrets.VIRUSTOTAL_API_KEY }}
+          ZIP_SHA256: ${{ steps.checksum.outputs.zip_sha256 }}
+          VT_ANALYSIS_ID: ${{ steps.virustotal.outputs.analysis_id }}
+        run: |
+          $headers = @{
+            "x-apikey" = $env:VIRUSTOTAL_API_KEY
+          }
+
+          $stats = $null
+          for ($i = 1; $i -le 20; $i++) {
+            $analysis = Invoke-RestMethod `
+              -Method Get `
+              -Uri "https://www.virustotal.com/api/v3/analyses/$env:VT_ANALYSIS_ID" `
+              -Headers $headers
+
+            if ($analysis.data.attributes.status -eq "completed") {
+              $stats = $analysis.data.attributes.stats
+              break
+            }
+
+            Write-Host "VirusTotal analysis is $($analysis.data.attributes.status). Waiting before retry $i/20..."
+            Start-Sleep -Seconds 15
+          }
+
+          if ($null -eq $stats) {
+            $fileReport = Invoke-RestMethod `
+              -Method Get `
+              -Uri "https://www.virustotal.com/api/v3/files/$env:ZIP_SHA256" `
+              -Headers $headers
+            $stats = $fileReport.data.attributes.last_analysis_stats
+          }
+
+          if ($null -eq $stats) {
+            throw "VirusTotal returned no analysis stats for ZIP hash $env:ZIP_SHA256."
+          }
+
+          $malicious = [int]$stats.malicious
+          $suspicious = [int]$stats.suspicious
+          $url = "https://www.virustotal.com/gui/file/$env:ZIP_SHA256/detection"
+
+          if ($malicious -ne 0 -or $suspicious -ne 0) {
+            throw "Release blocked. VirusTotal detections are malicious=$malicious suspicious=$suspicious. $url"
+          }
+
+          "url=$url" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "malicious=$malicious" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "suspicious=$suspicious" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Prepare release notes
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ZIP_SHA256: ${{ steps.checksum.outputs.zip_sha256 }}
+          VT_URL: ${{ steps.vt_clean.outputs.url }}
+          VT_MALICIOUS: ${{ steps.vt_clean.outputs.malicious }}
+          VT_SUSPICIOUS: ${{ steps.vt_clean.outputs.suspicious }}
+        run: |
+          @"
+          ## koji MapBundle $env:RELEASE_TAG
+
+          QGIS plugin ZIP built by GitHub Actions.
+
+          - Plugin ZIP: koji_MapBundle.zip
+          - ZIP SHA256: $env:ZIP_SHA256
+          - VirusTotal check: $env:VT_URL
+          - VirusTotal detections: malicious=$env:VT_MALICIOUS suspicious=$env:VT_SUSPICIOUS
+          "@ | Set-Content -Path release-notes.md -Encoding utf8
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          body_path: release-notes.md
+          files: ${{ env.ZIP_PATH }}
+          fail_on_unmatched_files: true

@@ -1,0 +1,78 @@
+name: Build Plugin ZIP
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PLUGIN_NAME: koji_MapBundle
+  ZIP_ARTIFACT: koji_MapBundle_plugin_zip
+  ZIP_PATH: dist/koji_MapBundle.zip
+
+jobs:
+  build:
+    name: Build QGIS plugin ZIP
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build plugin ZIP
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File tools\build_plugin_zip.ps1
+
+      - name: Verify plugin ZIP
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+          if (-not (Test-Path "${{ env.ZIP_PATH }}")) {
+            throw "Plugin ZIP was not generated: ${{ env.ZIP_PATH }}"
+          }
+
+          $entries = [IO.Compression.ZipFile]::OpenRead((Resolve-Path "${{ env.ZIP_PATH }}")).Entries.FullName
+
+          $backslashEntries = $entries | Where-Object { $_ -match '\\' }
+          if ($backslashEntries) {
+            throw "ZIP contains backslashes in entry names, which QGIS plugin upload rejects: $($backslashEntries -join ', ')"
+          }
+
+          $required = @(
+            "${{ env.PLUGIN_NAME }}/metadata.txt",
+            "${{ env.PLUGIN_NAME }}/__init__.py",
+            "${{ env.PLUGIN_NAME }}/koji_MapBundle.py",
+            "${{ env.PLUGIN_NAME }}/icon.png"
+          )
+
+          foreach ($entry in $required) {
+            if ($entries -notcontains $entry) {
+              throw "Required ZIP entry was not found: $entry"
+            }
+          }
+
+          $blocked = $entries | Where-Object {
+            $_ -match '(^|/)__pycache__/' -or
+            $_ -match '\.py[co]$' -or
+            $_ -match '(^|/)\.git/' -or
+            $_ -match '(^|/)\.github/' -or
+            $_ -match 'ChatGPT Image'
+          }
+          if ($blocked) {
+            throw "ZIP contains files that should not be distributed: $($blocked -join ', ')"
+          }
+
+          Get-Item "${{ env.ZIP_PATH }}" | Select-Object FullName, Length, LastWriteTime
+
+      - name: Upload plugin ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_ARTIFACT }}
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+          retention-days: 30

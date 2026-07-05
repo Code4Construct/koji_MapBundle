@@ -1,6 +1,6 @@
-# koji_MapBundle
+# koji MapBundle
 
-koji_MapBundle is a QGIS plugin for exporting and importing project map assets as
+koji MapBundle is a QGIS plugin for exporting and importing project map assets as
 portable ZIP-based map bundles.
 
 It packages selected layers, layer styles, SVG symbols, and print layouts, then
@@ -18,8 +18,8 @@ sources after import.
 
 ## Usage
 
-1. Enable `koji_MapBundle` in the QGIS plugin manager.
-2. Open `koji_MapBundle` from the toolbar or plugin menu.
+1. Enable `koji MapBundle` in the QGIS plugin manager.
+2. Open `koji MapBundle` from the toolbar or plugin menu.
 3. Choose `地図バンドルを書き出し` to create a ZIP bundle.
 4. Choose `地図バンドルを読み込み` to import a received ZIP bundle.
 
