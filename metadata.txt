@@ -1,4 +1,4 @@
-[general]
+﻿[general]
 name=koji MapBundle
 qgisMinimumVersion=3.28
 description=Export and import QGIS layers, styles, symbols, and layouts as reusable map bundles.
@@ -11,7 +11,7 @@ tracker=https://github.com/Code4Construct/koji_MapBundle/issues
 repository=https://github.com/Code4Construct/koji_MapBundle
 hasProcessingProvider=no
 tags=python,QGIS,map bundle,GeoPackage,style,layout,project
-homepage=https://www.arinobu.org/koji_mapbundle.html
+homepage=https://www.arinobu.org/koji_MapBundle.html
 category=Vector
 icon=icon.png
 license=GPL-2.0-or-later
